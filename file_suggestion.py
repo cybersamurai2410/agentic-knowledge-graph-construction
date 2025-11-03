@@ -15,7 +15,7 @@ from google.genai import types # For creating message Content/Parts
 from typing import Dict, Any, List
 
 # Convenience libraries for working with Neo4j inside of Google ADK
-from neo4j_for_adk import graphdb, tool_success, tool_error
+from graph_utilities import graphdb, tool_success, tool_error
 
 from tools import get_approved_user_goal
 from helper import get_neo4j_import_dir
