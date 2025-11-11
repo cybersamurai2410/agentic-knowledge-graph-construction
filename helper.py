@@ -6,7 +6,7 @@ from google.adk.agents import Agent
 from google.adk.sessions import InMemorySessionService, Session
 from google.adk.runners import Runner
 from typing import Optional, Dict, Any
-                                                                                                                                                                                                                                                            
+                                                                                                                                                                                                                                                                                                             
 def load_env():
     _ = load_dotenv(find_dotenv())
 
@@ -39,21 +39,27 @@ class AgentCaller:
         """Call the agent with a query and return the response."""
         print(f"\n>>> User Query: {query}")
 
+        # Prepare the user's message in ADK format
         content = types.Content(role='user', parts=[types.Part(text=query)])
 
-        final_response_text = "Agent did not produce a final response."
+        final_response_text = "Agent did not produce a final response." # Default
 
+        # Key Concept: run_async executes the agent logic and yields Events.
+        # We iterate through events to find the final answer.
         async for event in self.runner.run_async(user_id=self.user_id, session_id=self.session_id, new_message=content):
+            # You can uncomment the line below to see *all* events during execution
             if verbose:
                 print(f"  [Event] Author: {event.author}, Type: {type(event).__name__}, Final: {event.is_final_response()}, Content: {event.content}")
 
+            # Key Concept: is_final_response() marks the concluding message for the turn.
             if event.is_final_response():
                 if event.content and event.content.parts:
+                    # Assuming text response in the first part
                     final_response_text = event.content.parts[0].text
-                elif event.actions and event.actions.escalate: 
+                elif event.actions and event.actions.escalate: # Handle potential errors/escalations
                     final_response_text = f"Agent escalated: {event.error_message or 'No specific message.'}"
                 if event.author == self.agent.name:
-                    break
+                    break # Stop processing events once the final response is found
 
         self.session = self.runner.session_service.get_session(app_name=self.runner.app_name, user_id=self.user_id, session_id=self.session_id)
 
@@ -67,6 +73,7 @@ async def make_agent_caller(agent: Agent, initial_state: Optional[Dict[str, Any]
     user_id = agent.name + "_user"
     session_id = agent.name + "_session_01"
     
+    # Initialize a session
     await session_service.create_session(
         app_name=app_name,
         user_id=user_id,
