@@ -84,6 +84,19 @@ class StructuredSchemaApprovalRequest(BaseModel):
     approved_construction_plan: Dict[str, Dict[str, Any]]
 
 
+class GraphRagAskRequest(BaseModel):
+    question: str = Field(..., min_length=3, max_length=2000)
+    top_k: int = Field(default=5, ge=1, le=25)
+
+
+class GraphRagAskResponse(BaseModel):
+    answer: str
+    llm_answer: str
+    llm_used: bool
+    evidence: List[Dict[str, Any]]
+    retrieved_count: int
+
+
 class Neo4jQueryResponse(BaseModel):
     status: str
     query_result: Optional[List[Dict[str, Any]]] = None

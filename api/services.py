@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-import csv
+import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List
+from urllib import request, error
 
 from fastapi import HTTPException
 
@@ -18,89 +20,6 @@ def import_dir() -> Path:
     if not p.exists():
         raise HTTPException(status_code=500, detail=f"NEO4J_IMPORT_DIR does not exist: {p}")
     return p
-
-
-def list_available_files() -> List[str]:
-    root = import_dir()
-    return sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file())
-
-
-def suggest_files(files: List[str], include_extensions: List[str], contains_any: List[str]) -> List[str]:
-    allowed = {ext.lower() for ext in include_extensions}
-    needle = [q.lower() for q in contains_any]
-
-    suggested: List[str] = []
-    for name in files:
-        lower_name = name.lower()
-        suffix = Path(lower_name).suffix
-        ext_ok = (not allowed) or suffix in allowed
-        contains_ok = (not needle) or any(q in lower_name for q in needle)
-        if ext_ok and contains_ok:
-            suggested.append(name)
-    return suggested
-
-
-def sample_file_lines(rel_path: str, max_rows: int = 5) -> List[Dict[str, str]]:
-    root = import_dir()
-    full = root / rel_path
-    if not full.exists() or not full.is_file():
-        raise HTTPException(status_code=404, detail=f"File not found: {rel_path}")
-
-    if full.suffix.lower() != ".csv":
-        return []
-
-    with open(full, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        return [row for _, row in zip(range(max_rows), reader)]
-
-
-def propose_structured_schema(approved_files: List[str]) -> Dict[str, Dict[str, Any]]:
-    """Heuristic schema proposal from CSV headers.
-
-    - singular/plural file stem -> node label
-    - *_id first column -> unique id
-    - two *_id columns -> relationship
-    """
-    plan: Dict[str, Dict[str, Any]] = {}
-    root = import_dir()
-
-    for rel in approved_files:
-        full = root / rel
-        if full.suffix.lower() != ".csv" or not full.exists():
-            continue
-
-        with open(full, newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            fields = reader.fieldnames or []
-
-        id_fields = [c for c in fields if c.lower().endswith("_id")]
-        stem = full.stem
-
-        if len(id_fields) >= 2:
-            rel_type = stem.upper()
-            plan[rel_type] = {
-                "construction_type": "relationship",
-                "source_file": rel,
-                "relationship_type": rel_type,
-                "from_node_label": id_fields[0].replace("_id", "").title(),
-                "from_node_column": id_fields[0],
-                "to_node_label": id_fields[1].replace("_id", "").title(),
-                "to_node_column": id_fields[1],
-                "properties": [c for c in fields if c not in id_fields],
-            }
-            continue
-
-        unique_column = id_fields[0] if id_fields else (fields[0] if fields else "id")
-        label = stem[:-1].title() if stem.endswith("s") else stem.title()
-        plan[label] = {
-            "construction_type": "node",
-            "source_file": rel,
-            "label": label,
-            "unique_column_name": unique_column,
-            "properties": [c for c in fields if c != unique_column],
-        }
-
-    return plan
 
 
 def create_uniqueness_constraint(label: str, unique_property_key: str) -> Dict[str, Any]:
@@ -211,3 +130,134 @@ def drop_neo4j_indexes_and_constraints() -> Dict[str, Any]:
             return result
 
     return {"status": "success", "message": "Dropped all indexes and constraints."}
+
+
+def retrieve_graph_context(question: str, top_k: int = 5) -> Dict[str, Any]:
+    """Retrieve graph evidence relevant to a natural-language question."""
+    query = """
+    MATCH (n)
+    WHERE any(k IN keys(n) WHERE toLower(toString(n[k])) CONTAINS toLower($q))
+    OPTIONAL MATCH (n)-[r]-(m)
+    RETURN labels(n) AS node_labels, properties(n) AS node_properties,
+           type(r) AS relationship_type, labels(m) AS neighbor_labels, properties(m) AS neighbor_properties
+    LIMIT $top_k
+    """
+    return graphdb.send_query(query, {"q": question, "top_k": top_k})
+
+
+def _build_graph_context(rows: List[Dict[str, Any]]) -> str:
+    lines = []
+    for row in rows:
+        n_labels = "/".join(row.get("node_labels") or ["Node"])
+        n_props = row.get("node_properties") or {}
+        rel = row.get("relationship_type") or "RELATED_TO"
+        m_labels = "/".join(row.get("neighbor_labels") or ["Node"])
+        m_props = row.get("neighbor_properties") or {}
+        lines.append(f"{n_labels} {n_props} -[{rel}]- {m_labels} {m_props}")
+    return "\n".join(lines[:30])
+
+
+def _generate_llm_answer(question: str, graph_context: str) -> tuple[str, bool]:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return (
+            "OpenAI API key is not configured. Returning evidence-grounded summary instead of model-generated answer.",
+            False,
+        )
+
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "You answer supply-chain questions using only provided graph evidence. Be concise and explicit.",
+            },
+            {
+                "role": "user",
+                "content": f"Question: {question}\n\nGraph evidence:\n{graph_context}",
+            },
+        ],
+        "temperature": 0.2,
+    }
+
+    req = request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with request.urlopen(req, timeout=30) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            message = body["choices"][0]["message"]["content"]
+            return message.strip(), True
+    except error.HTTPError as exc:
+        return f"LLM request failed with HTTP {exc.code}. Returning evidence-grounded summary.", False
+    except Exception:
+        return "LLM request failed. Returning evidence-grounded summary.", False
+
+
+def answer_question_with_graph(question: str, top_k: int = 5) -> Dict[str, Any]:
+    result = retrieve_graph_context(question, top_k)
+    if result.get("status") == "error":
+        return result
+
+    rows = result.get("query_result", [])
+    if not rows:
+        return {
+            "status": "success",
+            "answer": "I could not find matching graph evidence for that question yet.",
+            "llm_answer": "I could not find enough graph evidence to answer confidently.",
+            "llm_used": False,
+            "evidence": [],
+            "retrieved_count": 0,
+        }
+
+    focus = []
+    relation_lines = []
+    for row in rows:
+        labels = row.get("node_labels") or []
+        props = row.get("node_properties") or {}
+        rel_type = row.get("relationship_type")
+        neighbor_labels = row.get("neighbor_labels") or []
+        neighbor_props = row.get("neighbor_properties") or {}
+
+        label_text = "/".join(labels) if labels else "Node"
+        if props:
+            keyvals = ", ".join(f"{k}={v}" for k, v in list(props.items())[:3])
+            focus.append(f"{label_text}({keyvals})")
+        else:
+            focus.append(label_text)
+
+        if rel_type:
+            nb_text = "/".join(neighbor_labels) if neighbor_labels else "Node"
+            if neighbor_props:
+                nkeyvals = ", ".join(f"{k}={v}" for k, v in list(neighbor_props.items())[:2])
+                nb_text = f"{nb_text}({nkeyvals})"
+            relation_lines.append(f"{label_text} -[{rel_type}]- {nb_text}")
+
+    focus_summary = "; ".join(dict.fromkeys(focus))
+    relationship_summary = "; ".join(dict.fromkeys(relation_lines[:5]))
+
+    answer = (
+        f"Based on the graph evidence, relevant entities include: {focus_summary}. "
+        f"Observed relationships: {relationship_summary if relationship_summary else 'no direct relationships in retrieved sample'}."
+    )
+
+    graph_context = _build_graph_context(rows)
+    llm_answer, llm_used = _generate_llm_answer(question, graph_context)
+
+    return {
+        "status": "success",
+        "answer": answer,
+        "llm_answer": llm_answer if llm_used else answer,
+        "llm_used": llm_used,
+        "evidence": rows,
+        "retrieved_count": len(rows),
+    }
+

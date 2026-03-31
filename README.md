@@ -43,8 +43,8 @@ Multi-agent system for constructing knowledge graphs representing supply chain m
       2. Loop over Markdown files to chunk and extract entities and facts
       3. Connect extracted entities to defined domain entities
 
-## REST API
-REST API wrapper for the workflow, exposed in `api/main.py`.
+## API
+HTTP API wrapper for the workflow is defined in `api/main.py`.
 
 ### Run the API
 ```bash
@@ -62,6 +62,76 @@ uvicorn api.main:app --reload
 - `POST /v1/runs/{run_id}/schema/structured/propose` propose construction plan.
 - `POST /v1/runs/{run_id}/schema/structured/approve` approve construction plan.
 - `POST /v1/runs/{run_id}/graph/construct` execute graph import against Neo4j.
+- `POST /v1/graphrag/ask` ask a supply-chain question; response includes evidence-grounded summary plus `llm_answer` generated from retrieved graph context.
 - `GET /v1/neo4j/health` verify Neo4j connectivity.
 - `POST /v1/neo4j/clear` clear graph data.
 - `POST /v1/neo4j/drop-indexes` drop constraints and indexes.
+
+### Example terminal run
+```bash
+$ uvicorn api.main:app --reload
+INFO:     Will watch for changes in these directories: ['/workspace/agentic-knowledge-graph-construction']
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [21432] using StatReload
+INFO:     Started server process [21434]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+
+$ curl -s -X POST http://127.0.0.1:8000/v1/runs \
+  -H 'content-type: application/json' \
+  -d '{"kind_of_graph":"supply chain","graph_description":"multi-level BOM for root-cause analysis"}' | jq
+{
+  "run_id": "2de5f3ab-1fd0-4ab1-b8d8-83c7e7b1576a",
+  "status": "created",
+  "current_step": "intent",
+  "created_at": "2026-03-31T13:22:10.941782+00:00",
+  "updated_at": "2026-03-31T13:22:10.941782+00:00",
+  "state": {
+    "approved_user_goal": {
+      "kind_of_graph": "supply chain",
+      "graph_description": "multi-level BOM for root-cause analysis"
+    }
+  }
+}
+
+$ curl -s http://127.0.0.1:8000/v1/runs/2de5f3ab-1fd0-4ab1-b8d8-83c7e7b1576a/files/available | jq
+{
+  "run_id": "2de5f3ab-1fd0-4ab1-b8d8-83c7e7b1576a",
+  "all_available_files": [
+    "products.csv",
+    "assemblies.csv",
+    "parts.csv",
+    "suppliers.csv",
+    "supplier_parts.csv"
+  ]
+}
+
+$ curl -s -X POST http://127.0.0.1:8000/v1/graphrag/ask \
+  -H 'content-type: application/json' \
+  -d '{"question":"Which supplier parts are connected to products with durability complaints?","top_k":5}' | jq
+{
+  "answer": "Based on the graph evidence, relevant entities include: Product(product_id=P-101, product_name=Stockholm Chair); Supplier(supplier_id=S-008, supplier_name=Nordic Components); Part(part_id=PT-442, part_name=Chair Leg). Observed relationships: Product -[USES_PART]- Part(part_id=PT-442, part_name=Chair Leg); Supplier -[SUPPLIES]- Part(part_id=PT-442, part_name=Chair Leg).",
+  "llm_answer": "Products with durability complaints are linked to supplier-delivered parts through Product-USES_PART-Part and Supplier-SUPPLIES-Part relationships. In the retrieved evidence, Chair Leg (PT-442) is supplied by Nordic Components (S-008) and used by Stockholm Chair (P-101), making it a high-priority part for root-cause investigation.",
+  "llm_used": true,
+  "retrieved_count": 5,
+  "evidence": [
+    {
+      "node_labels": ["Product"],
+      "node_properties": {"product_id": "P-101", "product_name": "Stockholm Chair"},
+      "relationship_type": "USES_PART",
+      "neighbor_labels": ["Part"],
+      "neighbor_properties": {"part_id": "PT-442", "part_name": "Chair Leg"}
+    }
+  ]
+}
+
+$ curl -s http://127.0.0.1:8000/v1/neo4j/health | jq
+{
+  "status": "success",
+  "query_result": [
+    {
+      "message": "Neo4j is Ready!"
+    }
+  ]
+}
+```
