@@ -42,3 +42,26 @@ Multi-agent system for constructing knowledge graphs representing supply chain m
       1. Loop over construction rules to produce a domain graph
       2. Loop over Markdown files to chunk and extract entities and facts
       3. Connect extracted entities to defined domain entities
+
+## API
+HTTP API wrapper for the workflow is defined in `api/main.py`.
+
+### Run the API
+```bash
+pip install -r requirements.txt
+uvicorn api.main:app --reload
+```
+
+### Main endpoints
+- `POST /v1/runs` create a workflow run.
+- `POST /v1/runs/{run_id}/intent/perceive` set perceived intent.
+- `POST /v1/runs/{run_id}/intent/approve` approve perceived intent.
+- `GET /v1/runs/{run_id}/files/available` list files from `NEO4J_IMPORT_DIR`.
+- `POST /v1/runs/{run_id}/files/suggest` heuristically suggest files.
+- `POST /v1/runs/{run_id}/files/approve` approve files.
+- `POST /v1/runs/{run_id}/schema/structured/propose` propose construction plan.
+- `POST /v1/runs/{run_id}/schema/structured/approve` approve construction plan.
+- `POST /v1/runs/{run_id}/graph/construct` execute graph import against Neo4j.
+- `GET /v1/neo4j/health` verify Neo4j connectivity.
+- `POST /v1/neo4j/clear` clear graph data.
+- `POST /v1/neo4j/drop-indexes` drop constraints and indexes.
