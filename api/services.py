@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -17,6 +18,89 @@ def import_dir() -> Path:
     if not p.exists():
         raise HTTPException(status_code=500, detail=f"NEO4J_IMPORT_DIR does not exist: {p}")
     return p
+
+
+def list_available_files() -> List[str]:
+    root = import_dir()
+    return sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file())
+
+
+def suggest_files(files: List[str], include_extensions: List[str], contains_any: List[str]) -> List[str]:
+    allowed = {ext.lower() for ext in include_extensions}
+    needle = [q.lower() for q in contains_any]
+
+    suggested: List[str] = []
+    for name in files:
+        lower_name = name.lower()
+        suffix = Path(lower_name).suffix
+        ext_ok = (not allowed) or suffix in allowed
+        contains_ok = (not needle) or any(q in lower_name for q in needle)
+        if ext_ok and contains_ok:
+            suggested.append(name)
+    return suggested
+
+
+def sample_file_lines(rel_path: str, max_rows: int = 5) -> List[Dict[str, str]]:
+    root = import_dir()
+    full = root / rel_path
+    if not full.exists() or not full.is_file():
+        raise HTTPException(status_code=404, detail=f"File not found: {rel_path}")
+
+    if full.suffix.lower() != ".csv":
+        return []
+
+    with open(full, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        return [row for _, row in zip(range(max_rows), reader)]
+
+
+def propose_structured_schema(approved_files: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Heuristic schema proposal from CSV headers.
+
+    - singular/plural file stem -> node label
+    - *_id first column -> unique id
+    - two *_id columns -> relationship
+    """
+    plan: Dict[str, Dict[str, Any]] = {}
+    root = import_dir()
+
+    for rel in approved_files:
+        full = root / rel
+        if full.suffix.lower() != ".csv" or not full.exists():
+            continue
+
+        with open(full, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            fields = reader.fieldnames or []
+
+        id_fields = [c for c in fields if c.lower().endswith("_id")]
+        stem = full.stem
+
+        if len(id_fields) >= 2:
+            rel_type = stem.upper()
+            plan[rel_type] = {
+                "construction_type": "relationship",
+                "source_file": rel,
+                "relationship_type": rel_type,
+                "from_node_label": id_fields[0].replace("_id", "").title(),
+                "from_node_column": id_fields[0],
+                "to_node_label": id_fields[1].replace("_id", "").title(),
+                "to_node_column": id_fields[1],
+                "properties": [c for c in fields if c not in id_fields],
+            }
+            continue
+
+        unique_column = id_fields[0] if id_fields else (fields[0] if fields else "id")
+        label = stem[:-1].title() if stem.endswith("s") else stem.title()
+        plan[label] = {
+            "construction_type": "node",
+            "source_file": rel,
+            "label": label,
+            "unique_column_name": unique_column,
+            "properties": [c for c in fields if c != unique_column],
+        }
+
+    return plan
 
 
 def create_uniqueness_constraint(label: str, unique_property_key: str) -> Dict[str, Any]:

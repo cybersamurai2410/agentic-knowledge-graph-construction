@@ -18,24 +18,16 @@ from api.services import (
     clear_neo4j_data,
     construct_domain_graph,
     drop_neo4j_indexes_and_constraints,
-    import_dir,
-    neo4j_health,
-)
-from api.state import run_store
-from workflow.core import (
-    approve_perceived_user_goal,
-    approve_structured_schema,
-    approve_suggested_files,
     list_available_files,
+    neo4j_health,
     propose_structured_schema,
-    set_perceived_user_goal,
-    set_suggested_files,
     suggest_files,
 )
+from api.state import run_store
 
 app = FastAPI(
     title="Agentic Knowledge Graph Construction API",
-    version="1.1.0",
+    version="1.0.0",
     description="REST API wrapper around the agentic knowledge-graph construction workflow.",
 )
 
@@ -72,19 +64,20 @@ def get_run_state(run_id: str):
 @app.post("/v1/runs/{run_id}/intent/perceive")
 def perceive_intent(run_id: str, payload: PerceivedIntentRequest):
     run = run_store.get(run_id)
-    perceived = set_perceived_user_goal(run.state, payload.kind_of_graph, payload.graph_description)
+    run.state["perceived_user_goal"] = {
+        "kind_of_graph": payload.kind_of_graph,
+        "graph_description": payload.graph_description,
+    }
     run_store.update(run_id, status=RunStatus.awaiting_approval, step=RunStep.intent)
-    return {"run_id": run_id, "perceived_user_goal": perceived}
+    return {"run_id": run_id, "perceived_user_goal": run.state["perceived_user_goal"]}
 
 
 @app.post("/v1/runs/{run_id}/intent/approve", response_model=ApiResponse)
 def approve_intent(run_id: str):
     run = run_store.get(run_id)
-    try:
-        approve_perceived_user_goal(run.state)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
+    if "perceived_user_goal" not in run.state:
+        raise HTTPException(status_code=400, detail="No perceived_user_goal to approve.")
+    run.state["approved_user_goal"] = run.state["perceived_user_goal"]
     run_store.update(run_id, status=RunStatus.created, step=RunStep.file_selection)
     return ApiResponse(message="approved_user_goal recorded")
 
@@ -92,7 +85,7 @@ def approve_intent(run_id: str):
 @app.get("/v1/runs/{run_id}/files/available")
 def get_available_files(run_id: str):
     run = run_store.get(run_id)
-    files = list_available_files(import_dir())
+    files = list_available_files()
     run.state["all_available_files"] = files
     return {"run_id": run_id, "all_available_files": files}
 
@@ -100,9 +93,9 @@ def get_available_files(run_id: str):
 @app.post("/v1/runs/{run_id}/files/suggest")
 def suggest_run_files(run_id: str, payload: FileSuggestionRequest):
     run = run_store.get(run_id)
-    files = run.state.get("all_available_files") or list_available_files(import_dir())
+    files = run.state.get("all_available_files") or list_available_files()
     suggested = suggest_files(files, payload.include_extensions, payload.contains_any)
-    set_suggested_files(run.state, suggested)
+    run.state["suggested_files"] = suggested
     run_store.update(run_id, status=RunStatus.awaiting_approval, step=RunStep.file_selection)
     return {"run_id": run_id, "suggested_files": suggested}
 
@@ -110,7 +103,7 @@ def suggest_run_files(run_id: str, payload: FileSuggestionRequest):
 @app.post("/v1/runs/{run_id}/files/approve", response_model=ApiResponse)
 def approve_run_files(run_id: str, payload: FileApprovalRequest):
     run = run_store.get(run_id)
-    approve_suggested_files(run.state, payload.approved_files)
+    run.state["approved_files"] = payload.approved_files
     run_store.update(run_id, status=RunStatus.created, step=RunStep.structured_schema)
     return ApiResponse(message="approved_files recorded")
 
@@ -121,8 +114,7 @@ def propose_structured(run_id: str):
     approved_files = run.state.get("approved_files", [])
     if not approved_files:
         raise HTTPException(status_code=400, detail="No approved_files found. Approve files first.")
-
-    plan = propose_structured_schema(import_dir(), approved_files)
+    plan = propose_structured_schema(approved_files)
     run.state["proposed_construction_plan"] = plan
     run_store.update(run_id, status=RunStatus.awaiting_approval, step=RunStep.structured_schema)
     return StructuredSchemaProposalResponse(proposed_construction_plan=plan)
@@ -131,7 +123,7 @@ def propose_structured(run_id: str):
 @app.post("/v1/runs/{run_id}/schema/structured/approve", response_model=ApiResponse)
 def approve_structured(run_id: str, payload: StructuredSchemaApprovalRequest):
     run = run_store.get(run_id)
-    approve_structured_schema(run.state, payload.approved_construction_plan)
+    run.state["approved_construction_plan"] = payload.approved_construction_plan
     run_store.update(run_id, status=RunStatus.ready_for_construction, step=RunStep.construction)
     return ApiResponse(message="approved_construction_plan recorded")
 

@@ -43,8 +43,8 @@ Multi-agent system for constructing knowledge graphs representing supply chain m
       2. Loop over Markdown files to chunk and extract entities and facts
       3. Connect extracted entities to defined domain entities
 
-## API
-HTTP API wrapper for the workflow is defined in `api/main.py`.
+## REST API (FastAPI)
+This repository now includes a REST API wrapper for the workflow, exposed via FastAPI in `api/main.py`.
 
 ### Run the API
 ```bash
